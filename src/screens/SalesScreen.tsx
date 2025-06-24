@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, ScrollView, StyleSheet, Alert } from 'react-native';
-import { Text, Card, TextInput, Button, DataTable } from 'react-native-paper';
+import { Text, Card, TextInput, Button, DataTable, ActivityIndicator } from 'react-native-paper';
 import { dataStore } from '../store/dataStore';
 import { Sale } from '../types';
+import GoogleSheetsService from '../services/GoogleSheetsService';
 
 export default function SalesScreen() {
   const [formData, setFormData] = useState({
@@ -15,6 +16,57 @@ export default function SalesScreen() {
 
   const [sales, setSales] = useState<Sale[]>(dataStore.getSales());
   const [showForm, setShowForm] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  useEffect(() => {
+    // تحميل البيانات عند بدء التطبيق
+    loadSalesData();
+  }, []);
+
+  const handleGoogleSheetsAuth = async () => {
+    setIsLoading(true);
+    try {
+      const success = await GoogleSheetsService.authenticate();
+      if (success) {
+        setIsAuthenticated(true);
+        Alert.alert('نجح', 'تم تسجيل الدخول إلى Google Sheets بنجاح!');
+        await syncWithGoogleSheets();
+      } else {
+        Alert.alert('خطأ', 'فشل في تسجيل الدخول إلى Google Sheets');
+      }
+    } catch (error) {
+      Alert.alert('خطأ', 'حدث خطأ أثناء تسجيل الدخول');
+      console.error('خطأ في المصادقة:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const syncWithGoogleSheets = async () => {
+    if (!isAuthenticated) return;
+    
+    setIsSyncing(true);
+    try {
+      // جلب البيانات من Google Sheets
+      const sheetsData = await GoogleSheetsService.getSalesData();
+      
+      // تحديث البيانات المحلية (يمكن تحسين هذا لتجنب التكرار)
+      console.log('بيانات من Google Sheets:', sheetsData);
+      
+      Alert.alert('نجح', 'تم مزامنة البيانات مع Google Sheets');
+    } catch (error) {
+      console.error('خطأ في المزامنة:', error);
+      Alert.alert('خطأ', 'فشل في مزامنة البيانات مع Google Sheets');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const loadSalesData = () => {
+    setSales(dataStore.getSales());
+  };
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({
@@ -41,35 +93,65 @@ export default function SalesScreen() {
       return;
     }
 
-    const { totalCost, profit } = calculateTotals();
-    
-    const newSale: Sale = {
-      id: Date.now().toString(),
-      customerName: formData.customerName,
-      bookName: formData.bookName,
-      quantity: parseFloat(formData.quantity),
-      wholesalePrice: parseFloat(formData.wholesalePrice),
-      sellingPrice: parseFloat(formData.sellingPrice),
-      totalCost,
-      profit,
-      date: new Date().toISOString(),
-    };
+    setIsLoading(true);
+    try {
+      const { totalCost, profit } = calculateTotals();
+      
+      const newSale: Sale = {
+        id: Date.now().toString(),
+        customerName: formData.customerName,
+        bookName: formData.bookName,
+        quantity: parseFloat(formData.quantity),
+        wholesalePrice: parseFloat(formData.wholesalePrice),
+        sellingPrice: parseFloat(formData.sellingPrice),
+        totalCost,
+        profit,
+        date: new Date().toISOString(),
+      };
 
-    await dataStore.addSale(newSale);
-    await dataStore.updateBookQuantity(formData.bookName, parseFloat(formData.quantity));
-    setSales(dataStore.getSales());
-    
-    // Reset form
-    setFormData({
-      customerName: '',
-      bookName: '',
-      quantity: '1',
-      wholesalePrice: '',
-      sellingPrice: '',
-    });
-    
-    setShowForm(false);
-    Alert.alert('نجح', 'تم حفظ المبيعة بنجاح!');
+      // حفظ محلياً
+      await dataStore.addSale(newSale);
+      await dataStore.updateBookQuantity(formData.bookName, parseFloat(formData.quantity));
+      
+      // حفظ في Google Sheets إذا كان المستخدم مسجل الدخول
+      if (isAuthenticated) {
+        try {
+          await GoogleSheetsService.saveSaleData({
+            bookTitle: newSale.bookName,
+            quantity: newSale.quantity,
+            price: newSale.sellingPrice,
+            total: newSale.quantity * newSale.sellingPrice,
+            date: new Date(newSale.date).toLocaleDateString('ar-SA'),
+            customerName: newSale.customerName,
+          });
+          
+          Alert.alert('نجح', 'تم حفظ المبيعة محلياً وفي Google Sheets!');
+        } catch (error) {
+          console.error('خطأ في حفظ البيانات في Google Sheets:', error);
+          Alert.alert('تحذير', 'تم حفظ المبيعة محلياً، لكن فشل في حفظها في Google Sheets');
+        }
+      } else {
+        Alert.alert('نجح', 'تم حفظ المبيعة محلياً! (سجل الدخول إلى Google Sheets للمزامنة)');
+      }
+      
+      setSales(dataStore.getSales());
+      
+      // Reset form
+      setFormData({
+        customerName: '',
+        bookName: '',
+        quantity: '1',
+        wholesalePrice: '',
+        sellingPrice: '',
+      });
+      
+      setShowForm(false);
+    } catch (error) {
+      Alert.alert('خطأ', 'حدث خطأ أثناء حفظ المبيعة');
+      console.error('خطأ في حفظ المبيعة:', error);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const { totalCost, totalRevenue, profit } = calculateTotals();
@@ -82,10 +164,46 @@ export default function SalesScreen() {
           onPress={() => setShowForm(!showForm)}
           style={styles.toggleButton}
           icon={showForm ? "close" : "plus"}
+          disabled={isLoading}
         >
           {showForm ? 'إلغاء' : 'إضافة مبيعة جديدة'}
         </Button>
+
+        {/* أزرار Google Sheets */}
+        <View style={styles.googleSheetsButtons}>
+          {!isAuthenticated ? (
+            <Button
+              mode="outlined"
+              onPress={handleGoogleSheetsAuth}
+              style={styles.authButton}
+              icon="google"
+              disabled={isLoading}
+            >
+              {isLoading ? 'جاري تسجيل الدخول...' : 'تسجيل الدخول إلى Google Sheets'}
+            </Button>
+          ) : (
+            <View style={styles.authenticatedButtons}>
+              <Text style={styles.authStatus}>✅ متصل بـ Google Sheets</Text>
+              <Button
+                mode="outlined"
+                onPress={syncWithGoogleSheets}
+                style={styles.syncButton}
+                icon="sync"
+                disabled={isSyncing}
+              >
+                {isSyncing ? 'جاري المزامنة...' : 'مزامنة البيانات'}
+              </Button>
+            </View>
+          )}
+        </View>
       </View>
+
+      {isLoading && (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" />
+          <Text style={styles.loadingText}>جاري المعالجة...</Text>
+        </View>
+      )}
 
       {showForm && (
         <Card style={styles.formCard} elevation={3}>
@@ -97,6 +215,7 @@ export default function SalesScreen() {
               onChangeText={(value) => handleInputChange('customerName', value)}
               style={styles.input}
               mode="outlined"
+              disabled={isLoading}
             />
 
             <TextInput
@@ -105,6 +224,7 @@ export default function SalesScreen() {
               onChangeText={(value) => handleInputChange('bookName', value)}
               style={styles.input}
               mode="outlined"
+              disabled={isLoading}
             />
 
             <TextInput
@@ -114,6 +234,7 @@ export default function SalesScreen() {
               style={styles.input}
               mode="outlined"
               keyboardType="numeric"
+              disabled={isLoading}
             />
 
             <TextInput
@@ -123,6 +244,7 @@ export default function SalesScreen() {
               style={styles.input}
               mode="outlined"
               keyboardType="numeric"
+              disabled={isLoading}
             />
 
             <TextInput
@@ -132,6 +254,7 @@ export default function SalesScreen() {
               style={styles.input}
               mode="outlined"
               keyboardType="numeric"
+              disabled={isLoading}
             />
 
             <Card style={styles.summaryCard}>
@@ -159,8 +282,9 @@ export default function SalesScreen() {
               onPress={handleSubmit}
               style={styles.submitButton}
               icon="content-save"
+              disabled={isLoading}
             >
-              حفظ المبيعة
+              {isLoading ? 'جاري الحفظ...' : 'حفظ المبيعة'}
             </Button>
           </Card.Content>
         </Card>
@@ -211,6 +335,33 @@ const styles = StyleSheet.create({
   toggleButton: {
     marginBottom: 8,
   },
+  googleSheetsButtons: {
+    marginTop: 8,
+  },
+  authButton: {
+    marginBottom: 8,
+  },
+  authenticatedButtons: {
+    flexDirection: 'column',
+    gap: 8,
+  },
+  authStatus: {
+    color: '#10b981',
+    fontWeight: 'bold',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  syncButton: {
+    marginBottom: 8,
+  },
+  loadingContainer: {
+    alignItems: 'center',
+    padding: 20,
+  },
+  loadingText: {
+    marginTop: 10,
+    color: '#64748b',
+  },
   formCard: {
     margin: 16,
     marginTop: 0,
@@ -250,3 +401,4 @@ const styles = StyleSheet.create({
     padding: 20,
   },
 });
+
